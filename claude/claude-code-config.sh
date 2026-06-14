@@ -84,8 +84,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 无操作标志时默认全部执行
-if ! $RUN_CLAUDE_MD && ! $RUN_STATUSLINE && ! $RUN_SETTINGS; then
+# 未指定模块范围时默认全部执行
+# 非交互模式：settings 已由参数激活，仅需判断 --claude-md / --statusline
+# 交互模式：三个模块均需判断
+if $NON_INTERACTIVE; then
+  if ! $RUN_CLAUDE_MD && ! $RUN_STATUSLINE; then
+    RUN_CLAUDE_MD=true
+    RUN_STATUSLINE=true
+  fi
+elif ! $RUN_CLAUDE_MD && ! $RUN_STATUSLINE && ! $RUN_SETTINGS; then
   RUN_CLAUDE_MD=true
   RUN_STATUSLINE=true
   RUN_SETTINGS=true
@@ -247,36 +254,74 @@ merge_env() {
 
 # ── settings.json — 交互收集配置 + 写入 ──────────────────────────────────
 configure_settings() {
+  # ── 收集缺失的必填项 ──────────────────────────────────────────────────
+  local missing=()
+  [ -z "$BASE_URL" ]    && missing+=("--base-url")
+  [ -z "$API_KEY" ]     && missing+=("--api-key")
+  [ -z "$MODEL" ]       && missing+=("--model")
+  [ -z "$HAIKU_MODEL" ] && missing+=("--haiku-model")
 
-  if $NON_INTERACTIVE; then
-    [ -z "$BASE_URL" ]    && { echo "❌ 缺少 --base-url" >&2; exit 1; }
-    [ -z "$API_KEY" ]     && { echo "❌ 缺少 --api-key" >&2; exit 1; }
-    [ -z "$MODEL" ]       && { echo "❌ 缺少 --model" >&2; exit 1; }
-    [ -z "$HAIKU_MODEL" ] && { echo "❌ 缺少 --haiku-model" >&2; exit 1; }
-
+  if $NON_INTERACTIVE && [ ${#missing[@]} -eq 0 ]; then
+    # 所有必填项已通过命令行提供 → 纯非交互模式
     echo "API Base URL: $BASE_URL"
     echo "Model: $MODEL"
     echo "Haiku Model: $HAIKU_MODEL"
     echo "Custom Model: ${CUSTOM_MODEL:-(未设置)}"
   else
-    echo ""
+    # 有缺失项或纯交互模式 → 提示并只询问未提供的值
+    if [ ${#missing[@]} -gt 0 ]; then
+      echo ""
+      echo "⚠️  以下必填项未通过命令行提供，将进入交互式选择："
+      for m in "${missing[@]}"; do
+        echo "    • $m"
+      done
+    fi
 
-    until select_option "请选择 API Base URL:" BASE_URL_OPTIONS[@] BASE_URL; do :; done
+    # ── 只询问未提供的值 ──────────────────────────────────────────────
+    if [ -z "$BASE_URL" ]; then
+      echo ""
+      until select_option "请选择 API Base URL:" BASE_URL_OPTIONS[@] BASE_URL; do :; done
+    fi
 
-    echo ""
-    read -r -s -p "请输入你的 API KEY: " API_KEY
-    echo ""
-    [ -z "$API_KEY" ] && { echo "❌ API KEY 不能为空"; exit 1; }
+    if [ -z "$API_KEY" ]; then
+      echo ""
+      read -r -s -p "请输入你的 API KEY: " API_KEY
+      echo ""
+      [ -z "$API_KEY" ] && { echo "❌ API KEY 不能为空"; exit 1; }
+    fi
 
-    until select_option "请选择默认 Model（同时用于 Opus / Sonnet）:" MODEL_OPTIONS[@] MODEL; do :; done
-    until select_option "请选择 Haiku Model:" MODEL_OPTIONS[@] HAIKU_MODEL; do :; done
-    until select_option "请选择 Custom Model（可选）:" MODEL_OPTIONS[@] CUSTOM_MODEL true; do :; done
+    if [ -z "$MODEL" ]; then
+      until select_option "请选择默认 Model（同时用于 Opus / Sonnet）:" MODEL_OPTIONS[@] MODEL; do :; done
+    fi
+
+    if [ -z "$HAIKU_MODEL" ]; then
+      until select_option "请选择 Haiku Model:" MODEL_OPTIONS[@] HAIKU_MODEL; do :; done
+    fi
+
+    if [ -z "$CUSTOM_MODEL" ]; then
+      until select_option "请选择 Custom Model（可选）:" MODEL_OPTIONS[@] CUSTOM_MODEL true; do :; done
+    fi
   fi
 
   echo ""
   echo "==> 写入 settings.json ..."
   merge_env "$BASE_URL" "$API_KEY" "$MODEL" "$HAIKU_MODEL" "$CUSTOM_MODEL" "$SETTINGS"
   echo "    ✅ settings.json 写入完成 → $SETTINGS"
+
+  # ── 安装 TypeScript Language Server（skills 依赖）──────────────────────
+  echo ""
+  echo "==> 安装 TypeScript Language Server ..."
+  if command -v typescript-language-server &>/dev/null; then
+    echo "    ✅ typescript-language-server 已安装"
+  else
+    echo "    📦 正在安装 typescript-language-server ..."
+    if npm install -g typescript-language-server; then
+      echo "    ✅ typescript-language-server 安装成功"
+    else
+      echo "    ❌ 安装失败，请手动执行: npm install -g typescript-language-server"
+      echo "    🔗 https://github.com/typescript-language-server/typescript-language-server"
+    fi
+  fi
 }
 
 # ── CLAUDE.md — 远程下载 + 远程补充内容 ──────────────────────────────────
