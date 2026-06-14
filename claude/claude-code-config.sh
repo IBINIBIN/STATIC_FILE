@@ -9,6 +9,7 @@ CONFIG_BASE="${CLAUDE_CONFIG_BASE_URL:-https://static.jbjbjb.site/claude}"
 # 各资源 URL
 STATUSLINE_URL="${CONFIG_BASE}/statusLine.mjs"
 CLAUDE_MD_APPEND_URL="${CONFIG_BASE}/CLAUDE.md"
+SETTINGS_TEMPLATE_URL="${CONFIG_BASE}/settings.json"
 
 # ── 本地路径 ──────────────────────────────────────────────────────────────
 CLAUDE_DIR="$HOME/.claude"
@@ -306,8 +307,13 @@ configure_settings() {
   fi
 
   echo ""
-  echo "==> 写入 settings.json ..."
+  echo "==> 获取 settings.json 模版 ..."
   mkdir -p "$(dirname "$SETTINGS")"
+  fetch "$SETTINGS_TEMPLATE_URL" > "$SETTINGS" || exit 1
+  echo "    ✅ settings.json 模版获取成功"
+
+  echo ""
+  echo "==> 写入 settings.json ..."
   merge_env "$BASE_URL" "$API_KEY" "$MODEL" "$HAIKU_MODEL" "$CUSTOM_MODEL" "$SETTINGS"
   echo "    ✅ settings.json 写入完成 → $SETTINGS"
 
@@ -335,11 +341,8 @@ configure_claude_md() {
   fetch "https://raw.githubusercontent.com/forrestchang/andrej-karpathy-skills/main/CLAUDE.md" > "$tmp" || exit 1
 
   local append
-  if append=$(fetch "$CLAUDE_MD_APPEND_URL"); then
-    printf '\n%s\n' "$append" >> "$tmp"
-  else
-    echo "    ⚠️  远程附加配置获取失败，将使用基础 CLAUDE.md" >&2
-  fi
+  append=$(fetch "$CLAUDE_MD_APPEND_URL") || exit 1
+  printf '\n%s\n' "$append" >> "$tmp"
 
   mv "$tmp" "$CLAUDE_MD"
   echo "    ✅ CLAUDE.md 写入完成 → $CLAUDE_MD"
@@ -349,7 +352,7 @@ configure_claude_md() {
 configure_statusline() {
   echo "==> 获取 statusLine.mjs ..."
   local tmp="${STATUS_LINE}.tmp"
-  fetch "$STATUSLINE_URL" > "$tmp" || { rm -f "$tmp"; return 1; }
+  fetch "$STATUSLINE_URL" > "$tmp" || { rm -f "$tmp"; exit 1; }
   mv "$tmp" "$STATUS_LINE"
   echo "    ✅ statusLine.mjs 写入完成 → $STATUS_LINE"
 }
