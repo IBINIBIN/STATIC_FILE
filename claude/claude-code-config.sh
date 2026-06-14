@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # 远程配置地址（可通过环境变量覆盖）
 # =============================================================================
-CONFIG_BASE="${CLAUDE_CONFIG_BASE_URL:-https://static.jbjbjb/site/claude}"
+CONFIG_BASE="${CLAUDE_CONFIG_BASE_URL:-https://static.jbjbjb.site/claude}"
 
 # 各资源 URL
 STATUSLINE_URL="${CONFIG_BASE}/statusLine.mjs"
