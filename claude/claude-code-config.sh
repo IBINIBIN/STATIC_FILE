@@ -305,6 +305,7 @@ configure_settings() {
 
   echo ""
   echo "==> 写入 settings.json ..."
+  mkdir -p "$(dirname "$SETTINGS")"
   merge_env "$BASE_URL" "$API_KEY" "$MODEL" "$HAIKU_MODEL" "$CUSTOM_MODEL" "$SETTINGS"
   echo "    ✅ settings.json 写入完成 → $SETTINGS"
 
