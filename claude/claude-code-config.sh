@@ -14,10 +14,7 @@ CLAUDE_MD_APPEND_URL="${CONFIG_BASE}/CLAUDE.md"
 CLAUDE_DIR="$HOME/.claude"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 STATUS_LINE="$CLAUDE_DIR/statusLine.mjs"
-# ── 项目路径（脚本位于 claude/ 目录下）──────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-SETTINGS="$PROJECT_DIR/claude/settings.json"
+SETTINGS="$CLAUDE_DIR/settings.json"
 
 # =============================================================================
 # 参数解析
@@ -28,6 +25,7 @@ RUN_SETTINGS=false
 NON_INTERACTIVE=false
 
 # Settings 值 — 命令行参数直接设置，交互模式由 select_option 填充
+# 注意：CUSTOM_MODEL 可选，其余为必填
 BASE_URL=""
 API_KEY=""
 MODEL=""
@@ -110,7 +108,7 @@ BASE_URL_OPTIONS=(
   "GLM|https://open.bigmodel.cn/api/anthropic"
 )
 
-# 模型选项 (model / haiku-model / custom-model 共用)
+# 模型选项 (model / haiku-model / custom-model 共用) — 普通值，无标签|值分隔符
 MODEL_OPTIONS=(
   "deepseek-v4-flash[1m]"
   "deepseek-v4-pro[1m]"
@@ -122,6 +120,8 @@ MODEL_OPTIONS=(
 # =============================================================================
 # 辅助函数
 # =============================================================================
+
+# 下载 URL（2 次重试、静默模式），成功输出到 stdout，失败打印错误到 stderr 并返回 1
 fetch() {
   curl -fsSL --retry 2 "$1" || { echo "    ❌ 下载失败: $1" >&2; return 1; }
 }
@@ -129,7 +129,7 @@ fetch() {
 # ── 通用选项选择（支持标签|值格式） ──────────────────────────────────────
 # 用法: select_option "提示" ARRAY_NAME[@] result_var [allow_skip]
 # 返回: 0=成功, 1=失败（用户取消或无效选择）
-# allow_skip=true 时增加"留空"选项，返回空字符串
+# allow_skip=true 时增加"留空"选项；用户选择后 result_var 设为空字符串，函数返回 0
 select_option() {
   local prompt="$1"
   local -a opts=("${!2}")
@@ -186,7 +186,8 @@ select_option() {
 }
 
 # ── 合并 env 配置到 settings.json（纯 Bash：awk + sed）───────────────────
-# 只写入非空字段，保留已有 key；awk 直接跳过已有 ANTHROPIC_ 行，无需预处理
+# 只写入非空字段，自动跳过已有 ANTHROPIC_ 行
+# 注意：仅处理空 JSON {} 或已有 "env" 键的 settings.json；非空且无 "env" 键时会产生无效 JSON
 merge_env() {
   local base_url="$1" api_key="$2" model="$3" haiku_model="$4" custom_model="$5" target="$6"
 
@@ -217,6 +218,7 @@ merge_env() {
       print "  \"env\": {"
       _insert_keys()
       print "  },"
+      print "}"
     }
 
     /^\{[[:space:]]*\}[[:space:]]*$/ && !has_env {
@@ -252,7 +254,7 @@ merge_env() {
 # 配置函数
 # =============================================================================
 
-# ── settings.json — 交互收集配置 + 写入 ──────────────────────────────────
+# ── settings.json — 配置收集、写入与 TypeScript Language Server 安装 ────
 configure_settings() {
   # ── 收集缺失的必填项 ──────────────────────────────────────────────────
   local missing=()
@@ -325,7 +327,7 @@ configure_settings() {
   fi
 }
 
-# ── CLAUDE.md — 远程下载 + 远程补充内容 ──────────────────────────────────
+# ── CLAUDE.md — 从 GitHub 下载基础 CLAUDE.md，再附加远程补充内容 ─────────
 configure_claude_md() {
   echo "==> 获取 CLAUDE.md ..."
   local tmp="${CLAUDE_MD}.tmp"
@@ -372,7 +374,6 @@ print_summary() {
     echo "    statusLine    → $STATUS_LINE"
   fi
   echo ""
-  echo "    📡 配置来源: $CONFIG_BASE"
 }
 
 # =============================================================================
