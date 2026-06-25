@@ -33,38 +33,50 @@ MODEL=""
 HAIKU_MODEL=""
 CUSTOM_MODEL=""
 
-# ── 临时文件清理 ──────────────────────────────────────────────────────────
+# ── 清理与信号处理 ────────────────────────────────────────────────────────
 cleanup() {
-  rm -f "${SETTINGS}.tmp" "${STATUS_LINE}.tmp" "${CLAUDE_MD}.tmp"
+  rm -f "${SETTINGS}.tmp" "${SETTINGS}.tmp2" "${STATUS_LINE}.tmp" "${CLAUDE_MD}.tmp"
 }
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+trap 'echo "❌ 脚本在第 $LINENO 行执行失败（退出码: $?）" >&2' ERR
 
 usage() {
   cat << 'USAGE'
-用法: ./claude-code-config.sh [选项]
+用法: curl -fsSL https://static.jbjbjb.site/claude/claude-code-config.sh | bash -s -- [选项]
 
-交互模式（无预设参数）按提示依次配置。传入任一 Settings 参数即进入非交互模式。
-CLAUDE.md 与 statusLine.mjs 从远程拉取。
+一键配置 Claude Code：拉取 settings.json / CLAUDE.md / statusLine.mjs 并写入 ~/.claude/
 
-操作范围:
-  --claude-md       更新 ~/.claude/CLAUDE.md
-  --statusline      更新 ~/.claude/statusLine.mjs
+操作选项（可选，无参数时默认全部交互配置）:
+  --claude-md       拉取 ~/.claude/CLAUDE.md
+  --statusline      拉取 ~/.claude/statusLine.mjs
 
-Settings 参数（带 * 必填，传入后自动激活 settings + 非交互模式）:
-  * --base-url <URL>     Base URL
-  * --api-key <KEY>      API KEY
-  * --model <MODEL>      Model（同时用于 Opus/Sonnet）
-  * --haiku-model <M>    Haiku Model
-    --custom-model <M>   Custom Model（可选，不传留空）
+Settings 选项（传入任一即开启 settings 配置并进入非交互模式，* 为必填）:
+  * --base-url <URL>      API Base URL
+  * --api-key <KEY>       API Key
+  * --model <MODEL>       默认模型（同时设为 Opus / Sonnet 模型）
+  * --haiku-model <MODEL>  Haiku 模型
+    --custom-model <MODEL> 自定义模型（可选，不传留空）
 
-  -h, --help           显示帮助
+  -h, --help              显示本帮助
 
 示例:
-  ./claude-code-config.sh                                                       # 交互
-  ./claude-code-config.sh --base-url https://api.deepseek.com/anthropic \
-    --api-key sk-xxxx --model deepseek-v4-pro --haiku-model claude-haiku-4-5   # 非交互
+  # 全量交互配置（settings + CLAUDE.md + statusLine）
+  curl -fsSL https://static.jbjbjb.site/claude/claude-code-config.sh | bash
+
+  # 非交互全量配置（settings + CLAUDE.md + statusLine）
+  curl -fsSL https://static.jbjbjb.site/claude/claude-code-config.sh | bash -s -- \\
+    --base-url https://api.deepseek.com/anthropic \\
+    --api-key sk-xxxx \\
+    --model deepseek-v4-pro \\
+    --haiku-model claude-haiku-4-5 \\
+    --custom-model deepseek-v4-flash \\
+    --claude-md \\
+    --statusline
+
+  # 仅更新 CLAUDE.md
+  curl -fsSL https://static.jbjbjb.site/claude/claude-code-config.sh | bash -s -- --claude-md
 USAGE
   exit 0
 }
@@ -83,21 +95,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 未指定模块范围时默认全部执行
-# 非交互模式：settings 已由参数激活，仅需判断 --claude-md / --statusline
-# 交互模式：三个模块均需判断
-if $NON_INTERACTIVE; then
-  if ! $RUN_CLAUDE_MD && ! $RUN_STATUSLINE; then
-    RUN_CLAUDE_MD=true
-    RUN_STATUSLINE=true
-  fi
-elif ! $RUN_CLAUDE_MD && ! $RUN_STATUSLINE && ! $RUN_SETTINGS; then
+# 纯交互模式（无任何参数）→ 默认启用全部三个模块
+# 传入参数时只执行指定的模块，不连锁触发其他模块
+if ! $RUN_CLAUDE_MD && ! $RUN_STATUSLINE && ! $RUN_SETTINGS; then
   RUN_CLAUDE_MD=true
   RUN_STATUSLINE=true
   RUN_SETTINGS=true
 fi
 
-# ── 确保 .claude 目录存在 ────────────────────────────────────────────────
 mkdir -p "$CLAUDE_DIR"
 
 # ── 预设选项 ──────────────────────────────────────────────────────────────
@@ -122,9 +127,9 @@ MODEL_OPTIONS=(
 # 辅助函数
 # =============================================================================
 
-# 下载 URL（2 次重试、静默模式），成功输出到 stdout，失败打印错误到 stderr 并返回 1
+# 下载 URL（2 次重试；失败时 curl 和本函数均会在 stderr 输出错误），成功写入 stdout
 fetch() {
-  curl -fsSL --retry 2 "$1" || { echo "    ❌ 下载失败: $1" >&2; return 1; }
+  curl -fsSL --retry 2 --connect-timeout 10 --max-time 30 "$1" || { echo "    ❌ 下载失败: $1" >&2; return 1; }
 }
 
 # ── 通用选项选择（支持标签|值格式） ──────────────────────────────────────
@@ -136,6 +141,7 @@ select_option() {
   local -a opts=("${!2}")
   local result_var="$3"
   local allow_skip="${4:-false}"
+  local choice custom_val
 
   echo ""
   echo "$prompt"
@@ -161,32 +167,51 @@ select_option() {
   local max_opt=$((count + 1))
   $allow_skip && max_opt=$((count + 2))
 
-  read -r -p "请选择 [1-${max_opt}]: " choice
+  read -r -p "请选择 [1-${max_opt}]: " choice < /dev/tty || { echo "" >&2; echo "❌ 读取输入失败" >&2; return 1; }
+  if [ -z "$choice" ]; then
+    echo "❌ 输入不能为空"
+    return 1
+  fi
 
   if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le $count ]; then
     local entry="${opts[$((choice - 1))]}"
     if [[ "$entry" == *"|"* ]]; then
-      eval "$result_var=\"${entry#*|}\""
+      printf -v "$result_var" '%s' "${entry#*|}"
     else
-      eval "$result_var=\"$entry\""
+      printf -v "$result_var" '%s' "$entry"
     fi
-  elif [ "$choice" -eq $((count + 1)) ]; then
-    local custom_val
-    read -r -p "请输入自定义值: " custom_val
+  elif (( choice == count + 1 )); then
+    read -r -p "请输入自定义值: " custom_val < /dev/tty || { echo "" >&2; echo "❌ 读取输入失败" >&2; return 1; }
     if [ -z "$custom_val" ]; then
-      echo "❌ 输入不能为空"
+      echo "❌ 自定义值不能为空"
       return 1
     fi
-    eval "$result_var=\"$custom_val\""
-  elif $allow_skip && [ "$choice" -eq $((count + 2)) ]; then
-    eval "$result_var=\"\""
+    printf -v "$result_var" '%s' "$custom_val"
+  elif $allow_skip && (( choice == count + 2 )); then
+    printf -v "$result_var" '%s' ''
   else
     echo "❌ 无效选项: $choice"
     return 1
   fi
 }
 
+# ── 带重试限制的选项选择 ────────────────────────────────────────────────
+# 用法同 select_option，最多重试 5 次；超过返回 1
+select_with_retry() {
+  local retries=0 max_retries=5
+  until select_option "$@"; do
+    ((retries++))
+    if [ "$retries" -ge "$max_retries" ]; then
+      echo "❌ 超过最大重试次数 ($max_retries)，已取消" >&2
+      return 1
+    fi
+    echo "⚠️  重试 ($retries/$max_retries)..." >&2
+  done
+}
+
 # ── 合并 env 配置到 settings.json（纯 Bash：awk + sed）───────────────────
+# 用法: merge_env BASE_URL API_KEY MODEL HAIKU_MODEL CUSTOM_MODEL TARGET_FILE
+# 三步原子写入：awk → tmp，sed → tmp2，mv tmp2 → target（目标文件永不会处于半写入状态）
 # 只写入非空字段，自动跳过已有 ANTHROPIC_ 行
 # 注意：仅处理空 JSON {} 或已有 "env" 键的 settings.json；非空且无 "env" 键时会产生无效 JSON
 merge_env() {
@@ -197,6 +222,7 @@ merge_env() {
   fi
 
   local tmp="${target}.tmp"
+  local tmp2="${target}.tmp2"
 
   awk \
     -v base_url="$base_url" \
@@ -208,6 +234,17 @@ merge_env() {
 
     /"ANTHROPIC_/ { next }
 
+    # 单行 "env": {}  或  "env": {},  →  展开后插入键
+    /^[[:space:]]*"env"[[:space:]]*:[[:space:]]*\{[[:space:]]*\}[[:space:]]*,?[[:space:]]*$/ {
+      has_env = 1
+      print "  \"env\": {"
+      _insert_keys()
+      if ($0 ~ /},/) print "  },"
+      else print "  }"
+      next
+    }
+
+    # 多行 env 块开头
     /^[[:space:]]*"env"[[:space:]]*:[[:space:]]*\{/ {
       has_env = 1
       print
@@ -215,13 +252,16 @@ merge_env() {
       next
     }
 
+    # 非空 JSON 的结束 }，且没有 "env" → 新建 env 块并插入
     /^\}[[:space:]]*,?[[:space:]]*$/ && !has_env {
       print "  \"env\": {"
       _insert_keys()
       print "  },"
       print "}"
+      next
     }
 
+    # 空 JSON {} 且没有 "env" → 替换为 { "env": {...} }
     /^\{[[:space:]]*\}[[:space:]]*$/ && !has_env {
       print "{"
       print "  \"env\": {"
@@ -231,8 +271,10 @@ merge_env() {
       next
     }
 
+    # 透传所有未匹配行（原生 JSON 内容原样保留）
     { print }
 
+    # 插入 ANTHROPIC_ 键 — 注意：所有键必须以 ",\n" 结尾，后续 sed 负责清理尾随逗号
     function _insert_keys() {
       if (length(base_url)  > 0) printf "    \"ANTHROPIC_BASE_URL\": \"%s\",\n", base_url
       if (length(api_key)   > 0) printf "    \"ANTHROPIC_AUTH_TOKEN\": \"%s\",\n", api_key
@@ -244,11 +286,19 @@ merge_env() {
       if (length(haiku)     > 0) printf "    \"ANTHROPIC_DEFAULT_HAIKU_MODEL\": \"%s\",\n", haiku
       if (length(custom)    > 0) printf "    \"ANTHROPIC_CUSTOM_MODEL_OPTION\": \"%s\",\n", custom
     }
-  ' "$target" > "$tmp"
+  ' "$target" > "$tmp" || { echo "❌ awk 处理 settings.json 失败" >&2; rm -f "$tmp"; return 1; }
 
-  # 清理最后一个 ANTHROPIC 键后的尾随逗号（当它在 env 闭合 } 之前时）
-  sed -e '/,$/{ N; s/,\n\([[:space:]]*\}\)/\n\1/; }' "$tmp" > "$target"
+  # 清理 _insert_keys 插入的最后一个 ANTHROPIC_ 键后的尾随逗号:
+  #   情况1: "env" 是 JSON 的最后一个 key  → 处理 "键",\n}  模式
+  #   情况2: "env" 后面还有其他 key        → 处理 "键",\n}, 模式
+  sed -e '/,$/{ N; s/,\n\([[:space:]]*\}\)$/\n\1/; }' \
+      -e '/,$/{ N; s/,\n\([[:space:]]*\}\),/\n\1,/; }' "$tmp" > "$tmp2" || {
+    echo "❌ sed 处理 settings.json 失败" >&2
+    rm -f "$tmp" "$tmp2"
+    return 1
+  }
   rm -f "$tmp"
+  mv "$tmp2" "$target" || { echo "❌ 无法写入 $target（磁盘满或权限不足）" >&2; rm -f "$tmp2"; return 1; }
 }
 
 # =============================================================================
@@ -264,52 +314,58 @@ configure_settings() {
   [ -z "$MODEL" ]       && missing+=("--model")
   [ -z "$HAIKU_MODEL" ] && missing+=("--haiku-model")
 
-  if $NON_INTERACTIVE && [ ${#missing[@]} -eq 0 ]; then
-    # 所有必填项已通过命令行提供 → 纯非交互模式
+  if $NON_INTERACTIVE; then
+    # ── 非交互模式：缺必填项 → 报错退出 ──────────────────────────────
+    if [ ${#missing[@]} -gt 0 ]; then
+      echo ""
+      echo "❌ 非交互模式下缺少以下必填参数："
+      for m in "${missing[@]}"; do
+        echo "    • $m"
+      done
+      echo ""
+      echo "   使用 --help 查看完整用法。"
+      exit 1
+    fi
     echo "API Base URL: $BASE_URL"
     echo "Model: $MODEL"
     echo "Haiku Model: $HAIKU_MODEL"
     echo "Custom Model: ${CUSTOM_MODEL:-(未设置)}"
   else
-    # 有缺失项或纯交互模式 → 提示并只询问未提供的值
-    if [ ${#missing[@]} -gt 0 ]; then
-      echo ""
-      echo "⚠️  以下必填项未通过命令行提供，将进入交互式选择："
-      for m in "${missing[@]}"; do
-        echo "    • $m"
-      done
-    fi
-
-    # ── 只询问未提供的值 ──────────────────────────────────────────────
+    # ── 交互模式：逐个提示用户输入缺失项 ──────────────────────────────
     if [ -z "$BASE_URL" ]; then
       echo ""
-      until select_option "请选择 API Base URL:" BASE_URL_OPTIONS[@] BASE_URL; do :; done
+      select_with_retry "请选择 API Base URL:" BASE_URL_OPTIONS[@] BASE_URL || exit 1
     fi
 
     if [ -z "$API_KEY" ]; then
       echo ""
-      read -r -s -p "请输入你的 API KEY: " API_KEY
-      echo ""
-      [ -z "$API_KEY" ] && { echo "❌ API KEY 不能为空"; exit 1; }
+      until [ -n "$API_KEY" ]; do
+        read -r -s -p "请输入你的 API KEY: " API_KEY < /dev/tty || { echo "" >&2; echo "❌ 读取输入失败（需要交互式终端）" >&2; exit 1; }
+        echo ""
+        [ -z "$API_KEY" ] && echo "❌ API KEY 不能为空，请重新输入" >&2
+      done
     fi
 
     if [ -z "$MODEL" ]; then
-      until select_option "请选择默认 Model（同时用于 Opus / Sonnet）:" MODEL_OPTIONS[@] MODEL; do :; done
+      select_with_retry "请选择默认 Model（同时用于 Opus / Sonnet）:" MODEL_OPTIONS[@] MODEL || exit 1
     fi
 
     if [ -z "$HAIKU_MODEL" ]; then
-      until select_option "请选择 Haiku Model:" MODEL_OPTIONS[@] HAIKU_MODEL; do :; done
+      select_with_retry "请选择 Haiku Model:" MODEL_OPTIONS[@] HAIKU_MODEL || exit 1
     fi
 
     if [ -z "$CUSTOM_MODEL" ]; then
-      until select_option "请选择 Custom Model（可选）:" MODEL_OPTIONS[@] CUSTOM_MODEL true; do :; done
+      select_with_retry "请选择 Custom Model（可选）:" MODEL_OPTIONS[@] CUSTOM_MODEL true || exit 1
     fi
   fi
 
   echo ""
   echo "==> 获取 settings.json 模版 ..."
   mkdir -p "$(dirname "$SETTINGS")"
-  fetch "$SETTINGS_TEMPLATE_URL" > "$SETTINGS" || exit 1
+  local tmp="${SETTINGS}.tmp"
+  fetch "$SETTINGS_TEMPLATE_URL" > "$tmp" || { rm -f "$tmp"; exit 1; }
+  [ -s "$tmp" ] || { echo "❌ 下载的模版为空: $SETTINGS_TEMPLATE_URL" >&2; rm -f "$tmp"; exit 1; }
+  mv "$tmp" "$SETTINGS" || { echo "❌ 无法写入 $SETTINGS（磁盘满或权限不足）" >&2; exit 1; }
   echo "    ✅ settings.json 模版获取成功"
 
   echo ""
@@ -333,18 +389,19 @@ configure_settings() {
   fi
 }
 
-# ── CLAUDE.md — 从 GitHub 下载基础 CLAUDE.md，再附加远程补充内容 ─────────
+# ── CLAUDE.md — 从 andrej-karpathy-skills 项目获取基础系统提示，再附加远程补充内容 ─────────
 configure_claude_md() {
   echo "==> 获取 CLAUDE.md ..."
   local tmp="${CLAUDE_MD}.tmp"
 
   fetch "https://raw.githubusercontent.com/forrestchang/andrej-karpathy-skills/main/CLAUDE.md" > "$tmp" || exit 1
+  [ -s "$tmp" ] || { echo "❌ 下载的 CLAUDE.md 基础文件为空" >&2; exit 1; }
 
   local append
   append=$(fetch "$CLAUDE_MD_APPEND_URL") || exit 1
-  printf '\n%s\n' "$append" >> "$tmp"
+  printf '\n%s\n' "$append" >> "$tmp"   # 在基础内容与附加内容之间保留空行分隔
 
-  mv "$tmp" "$CLAUDE_MD"
+  mv "$tmp" "$CLAUDE_MD" || { echo "❌ 无法写入 $CLAUDE_MD（磁盘满或权限不足）" >&2; exit 1; }
   echo "    ✅ CLAUDE.md 写入完成 → $CLAUDE_MD"
 }
 
@@ -353,7 +410,8 @@ configure_statusline() {
   echo "==> 获取 statusLine.mjs ..."
   local tmp="${STATUS_LINE}.tmp"
   fetch "$STATUSLINE_URL" > "$tmp" || { rm -f "$tmp"; exit 1; }
-  mv "$tmp" "$STATUS_LINE"
+  [ -s "$tmp" ] || { echo "❌ 下载的 statusLine 为空: $STATUSLINE_URL" >&2; rm -f "$tmp"; exit 1; }
+  mv "$tmp" "$STATUS_LINE" || { echo "❌ 无法写入 $STATUS_LINE（磁盘满或权限不足）" >&2; exit 1; }
   echo "    ✅ statusLine.mjs 写入完成 → $STATUS_LINE"
 }
 
@@ -391,3 +449,4 @@ $RUN_SETTINGS   && configure_settings
 $RUN_CLAUDE_MD  && configure_claude_md
 $RUN_STATUSLINE && configure_statusline
 print_summary
+
